@@ -1,0 +1,205 @@
+# -*- coding: utf-8 -*-
+"""
+Last updated Nov/03/2022
+
+@ author: Sreenivas Bhattiprolu, ZEISS
+@ modified by: Jaehoon Jung, PhD, OSU
+
+Semantic segmentation using U-Net architecture (prediction)
+"""
+
+from patchify import patchify, unpatchify
+
+import numpy as np
+import tifffile as tiff
+from matplotlib import pyplot as plt
+import keras
+import matplotlib.patches as mpatches
+import cv2 as cv
+
+def plotPatches(im,row):
+    plt.figure(figsize=(9, 9))
+    square = im.shape[1]
+    ix = 1
+    for i in range(square):
+    	for j in range(square):
+    		ax = plt.subplot(square, square, ix)
+    		ax.set_xticks([])
+    		ax.set_yticks([])
+    		plt.imshow(im[i+row, j, :, :], cmap='jet')
+    		ix += 1
+    
+def padding(image,s_patch):
+    h,w = np.shape(image)
+    pad_row = (0, s_patch - (h % s_patch))
+    pad_col = (0, s_patch - (w % s_patch))
+    image = np.pad(image, [pad_row, pad_col], mode='constant', constant_values=0)
+    return image,h,w
+
+def addPadding(image,s_patch):
+    h = image.shape[0]
+    w = image.shape[1]
+    pad_row = (0, s_patch - (h % s_patch))
+    pad_col = (0, s_patch - (w % s_patch))
+    dim = [pad_row, pad_col]
+    for i in range(2,len(image.shape)):
+        dim.append((0,0))
+    image = np.pad(image, dim, mode='constant', constant_values=0)
+    return image,h,w
+
+def plotImage(zi,t_cmap,filename):
+    plt.figure()
+    # plt.clf()
+    plt.imshow(zi, cmap=t_cmap)
+    plt.colorbar()
+    plt.xlabel('X (pixels)')
+    plt.ylabel('Y (pixels)')
+    plt.savefig(filename+".png",dpi=400)
+    plt.show()
+    
+def scaleData(data):
+    return (data - np.min(data)) / (np.max(data) - np.min(data))
+
+    
+    
+def saveImage(img,featureName,fileName,labels,cmap,p_dpi):
+    #-- bbox_to_anchor: https://stackoverflow.com/questions/40908983/arguements-of-bbox-to-anchor-function
+    plt.figure()
+    plt.imshow(img)
+    plt.xlabel('X (pixels)')
+    plt.ylabel('Y (pixels)')
+    plt.title(featureName)
+    plt.grid(False)
+    patches =[mpatches.Patch(color=cmap[i],label=labels[i]) for i in cmap]
+    plt.legend(handles=patches, loc=4, bbox_to_anchor=(1.5, 0))
+    plt.savefig(fileName + '.png', dpi=p_dpi)
+    plt.clf()
+    plt.close()
+
+labels = {0:'Unlabelled',
+         1:'Road',
+         2:'Road Marking',
+         3:'Vegetation',
+         4:'Building',
+         5:'Utility Line',
+         6:'Pole',
+         7:'Car',
+         8:'Fence',
+        }
+
+cmap = {0:[0/255, 0/255, 0/255,1], # Black   #Unlabelled
+        1:[0/255, 255/255, 255/255, 1],  # cyan  #road
+		2:[255/255, 255/255, 0/255, 1], #yellow # Road Marking
+		3:[0/255, 255/255, 0/255, 1], # Green #Natural
+		4:[255/255, 0/255, 0/255, 1], # Red #Building
+        5:[0/255, 0/255, 255/255, 1], # Blue #Utility Line
+		6:[128/255, 0/255, 0/255, 1], # Brown #pole
+        7:[255/255, 0/255, 255/255, 1], # magenta #Car
+        8:[128/255, 0/255, 128/255, 1], # purple #Fence
+        }
+
+
+
+def colorMap(data):
+    rgba = np.zeros((data.shape[0],data.shape[1],4))
+    rgba[data==0, :] = [0/255, 0/255, 0/255,1] # Black   #Unlabelled
+    rgba[data==1, :] = [0/255, 255/255, 255/255, 1]  # cyan  #road
+    rgba[data==2, :] = [255/255, 255/255, 0/255, 1] #yellow # Road Marking
+    rgba[data==3, :] = [0/255, 255/255, 0/255, 1] # Green #Natural
+    rgba[data==4, :] = [255/255, 0/255, 0/255, 1] # Red #Building
+    rgba[data==5, :] = [0/255, 0/255, 255/255, 1] # Blue #Utility Line
+    rgba[data==6, :] = [128/255, 0/255, 0/255, 1] # Brown #pole
+    rgba[data==7, :] = [255/255, 0/255, 255/255, 1] # magenta #Car
+    rgba[data==8, :] = [128/255, 0/255, 128/255, 1] # purple #Fence
+    return rgba
+
+# %% hyper parameters
+s_patch = 128
+s_step = 64
+n_classes = 9
+
+# %% load data and model
+# image = tiff.imread(r"D:\GEOSPATIAL FINAL PROJECT\Toronto_3D\acc_predicted.tif")
+image = tiff.imread(r"D:\GEOSPATIAL FINAL PROJECT\Toronto_3D\acc_predicted.tif")
+image = np.nan_to_num(image) # Replace NaN with zero number
+
+# RGB Channel
+RED_image = image[:,:,0] # RGB Channel Index = 0,1,2
+RED_image = scaleData(RED_image) # Scale data
+RED_image =np.expand_dims(RED_image,axis=2)
+
+GREEN_image = image[:,:,1] # RGB Channel Index = 0,1,2
+GREEN_image = scaleData(GREEN_image) # Scale data
+GREEN_image =np.expand_dims(GREEN_image,axis=2)
+
+BLUE_image = image[:,:,2] # RGB Channel Index = 0,1,2
+BLUE_image = scaleData(BLUE_image) # Scale data
+BLUE_image =np.expand_dims(BLUE_image,axis=2)
+
+# Intensity Channel
+intensity_image = image[:,:,3] # Intensity Channel Index = 9
+intensity_image = scaleData(intensity_image) # Scale data
+intensity_image =np.expand_dims(intensity_image,axis=2) # Expand dimension before doing concatenate
+
+# Concatenation
+image = np.concatenate((RED_image,GREEN_image,BLUE_image,intensity_image),axis=2) # Concat
+# image = intensity_image
+
+# Padding for Multi-Channel
+image, h, w = addPadding(image,s_patch) # add zero padding to patchify
+patches = patchify(image, (s_patch, s_patch, image.shape[2]), step=s_step)
+row, col, dep, h1, w1, c = patches.shape
+patches = patches.reshape(row*col*dep, h1, w1, c) 
+
+
+
+
+model = keras.models.load_model(r"Toronto_Project_model.hdf5", compile=False)
+
+patches_predicted = []
+for patch_ in range(patches.shape[0]):
+#    for col in range(patches.shape[1]):
+    print(f"Now predicting on patch->>> {patch_}")
+    patch1 = patches[patch_,:,:,:] 
+    patch1 = np.expand_dims(np.array(patch1), axis=[0])
+    patch1_prediction = model.predict(patch1)  
+    patch1_predicted_img = np.argmax(patch1_prediction, axis=3)[0,:,:]
+    patches_predicted.append(patch1_predicted_img)
+
+patches_predicted = np.array(patches_predicted) 
+patches_predicted_reshaped = np.reshape(patches_predicted, (row,col,s_patch,s_patch) ) #-- Gives a new shape to an array without changing its data
+image_predicted = unpatchify(patches_predicted_reshaped, (image.shape[0],image.shape[1])) #-- merge patches into original image
+image_predicted = image_predicted[:h,:w] #-- recover original image size
+
+# plotImage(image,'jet','Original_image')
+plotImage(image_predicted,'jet','Predicted_image')
+
+
+# plt.imsave('Original_Image.png', image)
+saveImage(colorMap(image_predicted),"Predicted_image",r'D:\GEOSPATIAL FINAL PROJECT\Toronto_3D\new_Predicted_image',labels,cmap,5000) 
+
+# truth = tiff.imread(r"D:\GEOSPATIAL FINAL PROJECT\Toronto_3D\acc_truth.tif")
+truth = tiff.imread(r"D:\GEOSPATIAL FINAL PROJECT\Toronto_3D\acc_predicted.tif")
+truth = np.nan_to_num(truth)
+truth = truth[:,:,6]
+
+
+prediction1 = np.reshape(image_predicted,(h*w))
+truth1 = np.reshape(truth,(h*w))
+
+
+#Accuracies
+#Overall Accuracy
+from sklearn import metrics
+print('Accuracy =',metrics.accuracy_score(truth1,prediction1))
+
+
+#meaniou
+from keras.metrics import MeanIoU
+num_classes = 9
+IOU_KERAS = MeanIoU(num_classes=num_classes)
+IOU_KERAS.update_state(truth1,prediction1)
+print("Mean IoU =",IOU_KERAS.result().numpy())
+
+
+
